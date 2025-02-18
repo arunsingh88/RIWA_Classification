@@ -1,83 +1,40 @@
 from flask import Flask, request, jsonify
 import pandas as pd
 import numpy as np
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout
-from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
-import pickle
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.multiclass import OneVsRestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import LabelEncoder
+import joblib
 import os
 
 app = Flask(__name__)
 
-class LSTMTicketClassifier:
+class TicketClassifier:
     def __init__(self):
-        self.tokenizer = Tokenizer(num_words=10000)
+        self.vectorizer = TfidfVectorizer(max_features=5000)
         self.label_encoder = LabelEncoder()
-        self.model = None
-        self.max_length = 100  # Maximum length of sequences
+        self.classifier = OneVsRestClassifier(LogisticRegression(max_iter=1000))
         self.is_fitted = False
         
-    def create_model(self, vocab_size, num_classes):
-        """Create LSTM model architecture"""
-        model = Sequential([
-            Embedding(vocab_size, 128, input_length=self.max_length),
-            LSTM(128, return_sequences=True),
-            Dropout(0.3),
-            LSTM(64),
-            Dropout(0.3),
-            Dense(64, activation='relu'),
-            Dropout(0.3),
-            Dense(num_classes, activation='softmax')
-        ])
-        
-        model.compile(
-            optimizer='adam',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        
-        return model
-        
-    def train(self, data_path, epochs=10, batch_size=32):
+    def train(self, data_path):
         """Train the classifier using data from a CSV file"""
-        # Load and prepare data
         df = pd.read_csv(data_path)
         
-        # Encode labels
         self.label_encoder.fit(df['label'])
         encoded_labels = self.label_encoder.transform(df['label'])
         
-        # Prepare text data
-        self.tokenizer.fit_on_texts(df['text'])
-        sequences = self.tokenizer.texts_to_sequences(df['text'])
-        X = pad_sequences(sequences, maxlen=self.max_length)
+        X = self.vectorizer.fit_transform(df['text'])
         
-        # Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, encoded_labels, test_size=0.2, random_state=42
         )
         
-        # Create and train model
-        vocab_size = len(self.tokenizer.word_index) + 1
-        num_classes = len(self.label_encoder.classes_)
-        
-        self.model = self.create_model(vocab_size, num_classes)
-        
-        history = self.model.fit(
-            X_train, y_train,
-            validation_data=(X_test, y_test),
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=1
-        )
-        
+        self.classifier.fit(X_train, y_train)
         self.is_fitted = True
         
-        # Evaluate model
-        _, accuracy = self.model.evaluate(X_test, y_test, verbose=0)
+        accuracy = self.classifier.score(X_test, y_test)
         return accuracy
         
     def predict(self, text):
@@ -85,17 +42,12 @@ class LSTMTicketClassifier:
         if not self.is_fitted:
             raise ValueError("Model is not fitted. Train the model first.")
             
-        # Prepare input text
-        sequences = self.tokenizer.texts_to_sequences([text])
-        X = pad_sequences(sequences, maxlen=self.max_length)
+        X = self.vectorizer.transform([text])
+        probabilities = self.classifier.predict_proba(X)[0]
         
-        # Get predictions
-        probabilities = self.model.predict(X)[0]
-        
-        # Create predictions list for items with confidence >= 0.40
         predictions = []
         for idx, prob in enumerate(probabilities):
-            if prob >= 0.40:
+            if prob >= 0.30:  # Only include predictions with confidence >= 0.30
                 label = self.label_encoder.inverse_transform([idx])[0]
                 predictions.append({
                     'label': label,
@@ -106,44 +58,36 @@ class LSTMTicketClassifier:
         predictions.sort(key=lambda x: x['confidence'], reverse=True)
         return predictions
     
-    def save_model(self, base_path):
-        """Save the trained model and preprocessors"""
+    def save_model(self, path):
+        """Save the trained model"""
         if not self.is_fitted:
             raise ValueError("Model is not fitted. Train the model before saving.")
             
-        # Save Keras model
-        self.model.save(f"{base_path}_model")
-        
-        # Save tokenizer and label encoder
-        with open(f"{base_path}_preprocessors.pkl", 'wb') as f:
-            pickle.dump({
-                'tokenizer': self.tokenizer,
-                'label_encoder': self.label_encoder,
-                'is_fitted': self.is_fitted
-            }, f)
+        model_data = {
+            'vectorizer': self.vectorizer,
+            'label_encoder': self.label_encoder,
+            'classifier': self.classifier,
+            'is_fitted': self.is_fitted
+        }
+        joblib.dump(model_data, path)
     
     @classmethod
-    def load_model(cls, base_path):
-        """Load a trained model and preprocessors"""
-        if not os.path.exists(f"{base_path}_model"):
+    def load_model(cls, path):
+        """Load a trained model"""
+        if not os.path.exists(path):
             return None
             
         model = cls()
+        model_data = joblib.load(path)
         
-        # Load Keras model
-        model.model = load_model(f"{base_path}_model")
-        
-        # Load preprocessors
-        with open(f"{base_path}_preprocessors.pkl", 'rb') as f:
-            preprocessors = pickle.load(f)
-            model.tokenizer = preprocessors['tokenizer']
-            model.label_encoder = preprocessors['label_encoder']
-            model.is_fitted = preprocessors['is_fitted']
-            
+        model.vectorizer = model_data['vectorizer']
+        model.label_encoder = model_data['label_encoder']
+        model.classifier = model_data['classifier']
+        model.is_fitted = model_data.get('is_fitted', True)
         return model
 
 # Global classifier instance
-MODEL_PATH = 'lstm_ticket_classifier'
+MODEL_PATH = 'ticket_classifier.joblib'
 classifier = None
 
 def get_classifier():
@@ -151,17 +95,17 @@ def get_classifier():
     global classifier
     if classifier is None:
         # Try to load existing model
-        classifier = LSTMTicketClassifier.load_model(MODEL_PATH)
+        classifier = TicketClassifier.load_model(MODEL_PATH)
         if classifier is None:
             # Create new instance if no saved model exists
-            classifier = LSTMTicketClassifier()
+            classifier = TicketClassifier()
     return classifier
 
 @app.route('/train', methods=['GET'])
 def train():
     try:
         clf = get_classifier()
-        accuracy = clf.train('classification.csv')
+        accuracy = clf.train('classification.csv')  # Make sure this file exists
         clf.save_model(MODEL_PATH)
         
         return jsonify({
