@@ -1,16 +1,18 @@
 from flask import Flask, request, jsonify
 import pandas as pd
 import numpy as np
-# from tensorflow.keras.preprocessing.text import Tokenizer
-# from tensorflow.keras.preprocessing.sequence import pad_sequences
-# from tensorflow.keras.models import Sequential, load_model
-# from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential, load_model
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 import pickle
 import os
+import tensorflow as tf
+import joblib
+
 
 app = Flask(__name__)
 
@@ -82,6 +84,30 @@ class LSTMTicketClassifier:
         # Evaluate model
         _, accuracy = self.model.evaluate(X_test, y_test, verbose=0)
         return accuracy
+    
+    def classify_ticket(self,query):
+        model = tf.keras.models.load_model(f"{MODEL_PATH}.h5")
+        
+        with open(f"{MODEL_PATH}.pickle", 'rb') as file:
+            tokenizer = pickle.load(file)
+
+        label_encoder_path = f"{MODEL_PATH}.joblib"
+        label_encoder = joblib.load(label_encoder_path)
+
+        # Get the classes and their corresponding encoded labels
+    
+        text = [query]
+        text = tokenizer.texts_to_sequences(text)
+        text = pad_sequences(text, maxlen=62)
+        # Make predictions
+        predictions = model.predict(text)
+        predicted_label = []
+        for i in np.argsort(predictions)[:,-5:][0][::-1]:
+            if i == 24:
+                continue
+            predicted_label.append(label_encoder.inverse_transform([i])[0])
+        predicted_label.append("Other template")
+        return predicted_label
         
     def predict(self, text):
         """Predict ticket type with confidence scores"""
@@ -177,6 +203,8 @@ class NaiveBayesClassifier:
         # Calculate accuracy
         accuracy = self.model.score(X_test, y_test)
         return accuracy
+    
+
     
     def predict(self, text):
         """Predict ticket type with confidence scores"""
@@ -294,19 +322,13 @@ def predict():
             
         query = data['query']
         
-        clf = get_lstm_classifier()
-        if not clf.is_fitted:
-            return jsonify({
-                'status': 'error',
-                'message': 'LSTM Model not trained. Please train the model first.'
-            }), 400
-            
-        predictions = clf.predict(query)
+        predictions = LSTMTicketClassifier().classify_ticket(query)
+        return jsonify(predictions)
         
-        return jsonify({
-            'status': 'success',
-            'predictions': predictions
-        }), 200
+        # return jsonify({
+        #     'status': 'success',
+        #     'predictions': predictions
+        # }), 200
         
     except Exception as e:
         return jsonify({
